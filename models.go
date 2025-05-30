@@ -13,18 +13,6 @@ type DeepseekModelInfo struct {
 	Description string `json:"description"`
 }
 
-// GetModelByID returns a specific model by ID, or nil if not found
-// This function is kept for backward compatibility and will be used when a server instance is not available
-func GetModelByID(modelID string) *DeepseekModelInfo {
-	models := GetAvailableDeepseekModels()
-	for _, model := range models {
-		if model.ID == modelID {
-			return &model
-		}
-	}
-	return nil
-}
-
 // GetModelByIDFromServer returns a specific model by ID from the server's discovered models, or nil if not found
 func (s *DeepseekServer) GetModelByID(modelID string) *DeepseekModelInfo {
 	models := s.GetAvailableDeepseekModels()
@@ -34,24 +22,6 @@ func (s *DeepseekServer) GetModelByID(modelID string) *DeepseekModelInfo {
 		}
 	}
 	return nil
-}
-
-// ValidateModelID checks if a model ID is in the list of available models
-// Returns nil if valid, error otherwise
-// This function is kept for backward compatibility and will be used when a server instance is not available
-func ValidateModelID(modelID string) error {
-	if GetModelByID(modelID) != nil {
-		return nil
-	}
-
-	// Model not found, return error with available models
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Invalid model ID: %s. Available models are:", modelID))
-	for _, model := range GetAvailableDeepseekModels() {
-		sb.WriteString(fmt.Sprintf("\n- %s: %s", model.ID, model.Name))
-	}
-
-	return errors.New(sb.String())
 }
 
 // ValidateModelID checks if a model ID is in the list of available models from the server
@@ -69,12 +39,6 @@ func (s *DeepseekServer) ValidateModelID(modelID string) error {
 	}
 
 	return errors.New(sb.String())
-}
-
-// GetAvailableDeepseekModels returns a list of fallback DeepSeek models when the server instance is not available
-// This is kept for backward compatibility and as a fallback
-func GetAvailableDeepseekModels() []DeepseekModelInfo {
-	return getFallbackDeepseekModels()
 }
 
 // getFallbackDeepseekModels returns a hardcoded list of DeepSeek models as a fallback
