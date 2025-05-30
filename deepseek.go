@@ -344,54 +344,6 @@ func getAvailabilityStatus(isAvailable bool) string {
 	return "❌ Unavailable (Insufficient balance for API calls)"
 }
 
-// executeDeepseekRequest makes the request to the DeepSeek API with retry capability
-func (s *DeepseekServer) executeDeepseekRequest(ctx context.Context, model string, query string) (*deepseek.ChatCompletionResponse, error) {
-	// logger := getLoggerFromContext(ctx) // Old line, changed to s.logger
-	var response *deepseek.ChatCompletionResponse
-
-	// Define the operation to retry
-	operation := func() error {
-		var err error
-		// Set timeout context for the API call
-		timeoutCtx, cancel := context.WithTimeout(ctx, s.config.HTTPTimeout)
-		defer cancel()
-
-		request := &deepseek.ChatCompletionRequest{
-			Model: model,
-			Messages: []deepseek.ChatCompletionMessage{
-				{
-					Role:    deepseek.ChatMessageRoleUser,
-					Content: query,
-				},
-			},
-			Temperature: s.config.DeepseekTemperature,
-		}
-		response, err = s.client.CreateChatCompletion(timeoutCtx, request)
-		if err != nil {
-			s.logger.Error("DeepSeek API error: %v", err) // Changed to s.logger
-			return err
-		}
-
-		return nil
-	}
-
-	// Execute the operation with retry logic
-	err := RetryWithBackoff(
-		ctx,
-		s.config.MaxRetries,
-		s.config.InitialBackoff,
-		s.config.MaxBackoff,
-		operation,
-		IsRetryableError, // Using the IsRetryableError from retry.go
-		s.logger,         // Changed to s.logger
-	)
-
-	if err != nil {
-		return nil, err
-	}
-
-	return response, nil
-}
 
 // formatResponse was here, now removed.
 

@@ -5,11 +5,6 @@ import (
 	"os"
 )
 
-// readFileFromDisk reads a file from disk - a wrapper around os.ReadFile that adds more context to errors
-// This function exists for backward compatibility
-func readFileFromDisk(filePath string) ([]byte, error) {
-	return readFile(filePath)
-}
 
 // ValidateFilePath validates a file path exists and has a supported extension
 func ValidateFilePath(path string, allowedTypes []string) error {
