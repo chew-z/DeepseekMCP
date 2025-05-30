@@ -76,7 +76,7 @@ func main() {
 		// Use a more specific error message for startup failure
 		startupErr := fmt.Errorf("effective model ID \"%s\" is invalid: %w", config.DeepseekModel, err)
 		logger.Error("Startup error: %v", startupErr) // Log the specific startup error
-		handleStartupError(ctx, startupErr) // Pass the specific startup error
+		handleStartupError(ctx, startupErr)           // Pass the specific startup error
 		return
 	}
 
@@ -107,29 +107,31 @@ func setupDeepseekServer(ctx context.Context, srv *server.MCPServer, config *Con
 	// Register the wrapped server
 	// Define and register tools
 	askTool := mcp.NewTool("deepseek_ask",
-		mcp.WithDescription("Use DeepSeek's AI model to ask about complex coding problems"),
-		mcp.AddParameter(mcp.StringParameter("query", mcp.Required(), mcp.Description("The coding problem or question for DeepSeek AI, including any relevant code."))),
-		mcp.AddParameter(mcp.StringParameter("model", mcp.Description("Optional: Specific DeepSeek model to use (e.g., deepseek-chat, deepseek-coder). Overrides default configuration."))),
-		mcp.AddParameter(mcp.StringParameter("systemPrompt", mcp.Description("Optional: Custom system prompt to guide the AI's behavior for this request. Overrides default configuration."))),
-		mcp.AddParameter(mcp.StringArrayParameter("file_paths", mcp.Description("Optional: Paths to files to include in the request context. Content will be appended to the query."))),
-		mcp.AddParameter(mcp.BoolParameter("json_mode", mcp.Description("Optional: Enable JSON mode for structured JSON responses. Set to true when expecting JSON output."))),
+		mcp.WithDescription("Use DeepSeek's AI model to ask about complex coding problems."),
+		mcp.WithString("query", mcp.Required(), mcp.Description("The coding problem or question for DeepSeek AI, including any relevant code.")),
+		mcp.WithString("model", mcp.Description("Optional: Specific DeepSeek model to use (e.g., deepseek-chat, deepseek-coder). Overrides default configuration.")),
+		mcp.WithString("systemPrompt", mcp.Description("Optional: Custom system prompt to guide the AI's behavior for this request. Overrides default configuration.")),
+		mcp.WithArray("file_paths", mcp.Description("Optional: Paths to files to include in the request context. Content will be appended to the query."), mcp.Items(map[string]any{"type": "string"})),
+		mcp.WithBoolean("json_mode", mcp.Description("Optional: Enable JSON mode for structured JSON responses. Set to true when expecting JSON output.")),
 	)
 	srv.AddTool(askTool, deepseekServer.handleAskDeepseek)
 
 	modelsTool := mcp.NewTool("deepseek_models",
-		mcp.WithDescription("List available DeepSeek models with descriptions"),
+		mcp.WithDescription("List available DeepSeek models with descriptions."),
+		// No parameters for this tool
 	)
 	srv.AddTool(modelsTool, deepseekServer.handleDeepseekModels)
 
 	balanceTool := mcp.NewTool("deepseek_balance",
-		mcp.WithDescription("Check your DeepSeek API account balance"),
+		mcp.WithDescription("Check your DeepSeek API account balance."),
+		// No parameters for this tool
 	)
 	srv.AddTool(balanceTool, deepseekServer.handleDeepseekBalance)
 
 	tokenEstimateTool := mcp.NewTool("deepseek_token_estimate",
 		mcp.WithDescription("Estimate the number of tokens in a given text or file content."),
-		mcp.AddParameter(mcp.StringParameter("text", mcp.Description("Text to estimate token count for. Use this or file_path."))),
-		mcp.AddParameter(mcp.StringParameter("file_path", mcp.Description("Path to a file to estimate token count for. Use this or text."))),
+		mcp.WithString("text", mcp.Description("Text to estimate token count for. Use this or file_path.")),
+		mcp.WithString("file_path", mcp.Description("Path to a file to estimate token count for. Use this or text.")),
 	)
 	srv.AddTool(tokenEstimateTool, deepseekServer.handleTokenEstimate)
 
@@ -171,14 +173,7 @@ func handleStartupError(ctx context.Context, err error) {
 
 	logger.Error("Initialization error: %v", err)
 
-	// Get config for EnableCaching status (if available)
-	var config *Config
-	configValue := ctx.Value(configKey)
-	if configValue != nil {
-		if cfg, ok := configValue.(*Config); ok {
-			config = cfg
-		}
-	}
+	// The 'config' variable was previously fetched here but not used after ErrorDeepseekServer removal.
 
 	// Create error server (This block is removed)
 	// errorServer := &ErrorDeepseekServer{

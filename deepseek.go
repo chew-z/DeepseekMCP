@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -34,7 +33,7 @@ func NewDeepseekServer(ctx context.Context, config *Config) (*DeepseekServer, er
 	}
 
 	client := deepseek.NewClient(config.DeepseekAPIKey)
-	
+
 	logger := getLoggerFromContext(ctx) // Get logger instance
 
 	server := &DeepseekServer{
@@ -42,12 +41,12 @@ func NewDeepseekServer(ctx context.Context, config *Config) (*DeepseekServer, er
 		client: client,
 		logger: logger, // Initialize logger
 	}
-	
+
 	err := server.discoverModels(ctx)
 	if err != nil {
 		server.logger.Warn("Failed to discover DeepSeek models, will use fallback models: %v", err) // Use s.logger
 	}
-	
+
 	return server, nil
 }
 
@@ -60,31 +59,31 @@ func (s *DeepseekServer) Close() {
 func (s *DeepseekServer) discoverModels(ctx context.Context) error {
 	logger := getLoggerFromContext(ctx)
 	logger.Info("Discovering available DeepSeek models from API")
-	
+
 	// Get models from the API
 	apiModels, err := deepseek.ListAllModels(s.client, ctx)
 	if err != nil {
 		logger.Error("Failed to get models from DeepSeek API: %v", err)
 		return err
 	}
-	
+
 	// Convert to our internal model format
 	var models []DeepseekModelInfo
 	for _, apiModel := range apiModels.Data {
 		modelName := s.formatModelName(apiModel.ID)
-		
+
 		models = append(models, DeepseekModelInfo{
 			ID:          apiModel.ID,
 			Name:        modelName,
 			Description: fmt.Sprintf("Model provided by %s", apiModel.OwnedBy),
 		})
 	}
-	
+
 	// Update the models list with thread safety
 	s.modelsMu.Lock()
 	defer s.modelsMu.Unlock()
 	s.models = models
-	
+
 	logger.Info("Discovered %d DeepSeek models", len(models))
 	return nil
 }
@@ -98,7 +97,7 @@ func (s *DeepseekServer) formatModelName(modelID string) string {
 			parts[i] = strings.ToUpper(part[:1]) + part[1:]
 		}
 	}
-	
+
 	return strings.Join(parts, " ")
 }
 
@@ -115,7 +114,7 @@ func (s *DeepseekServer) handleAskDeepseek(ctx context.Context, req mcp.CallTool
 	}
 
 	modelName := s.config.DeepseekModel
-	if customModel := req.GetString("model"); customModel != "" {
+	if customModel := req.GetString("model", ""); customModel != "" {
 		if err := s.ValidateModelID(customModel); err != nil {
 			s.logger.Error("Invalid model requested: %v", err)
 			return mcp.NewToolResultError(fmt.Sprintf("Invalid model specified: %v", err)), nil
@@ -125,17 +124,17 @@ func (s *DeepseekServer) handleAskDeepseek(ctx context.Context, req mcp.CallTool
 	}
 
 	systemPrompt := s.config.DeepseekSystemPrompt
-	if customPrompt := req.GetString("systemPrompt"); customPrompt != "" {
+	if customPrompt := req.GetString("systemPrompt", ""); customPrompt != "" {
 		s.logger.Info("Using request-specific system prompt")
 		systemPrompt = customPrompt
 	}
 
-	filePaths := req.GetStringArray("file_paths")
+	filePaths := req.GetStringSlice("file_paths", nil) // Changed to GetStringSlice with a default
 
-	jsonMode := req.GetBool("json_mode")
-    if jsonMode {
-        s.logger.Info("JSON mode is enabled via request")
-    }
+	jsonMode := req.GetBool("json_mode", false) // Added default value
+	if jsonMode {
+		s.logger.Info("JSON mode is enabled via request")
+	}
 
 	chatMessages := []deepseek.ChatCompletionMessage{
 		{Role: deepseek.ChatMessageRoleSystem, Content: systemPrompt},
@@ -148,7 +147,7 @@ func (s *DeepseekServer) handleAskDeepseek(ctx context.Context, req mcp.CallTool
 		fileContents := "\n\n# Reference Files\n"
 		successfulFiles := 0
 		var fileSizes []int64
-		
+
 		for _, filePath := range filePaths {
 			contentBytes, err := readFile(filePath)
 			if err != nil {
@@ -158,10 +157,10 @@ func (s *DeepseekServer) handleAskDeepseek(ctx context.Context, req mcp.CallTool
 			successfulFiles++
 			fileSizes = append(fileSizes, int64(len(contentBytes)))
 			language := getLanguageFromPath(filePath)
-			fileContents += fmt.Sprintf("\n\n## %s\n\n```%s\n%s\n```", 
+			fileContents += fmt.Sprintf("\n\n## %s\n\n```%s\n%s\n```",
 				filepath.Base(filePath), language, string(contentBytes))
 		}
-		
+
 		if successfulFiles > 0 {
 			s.logger.Info("Including %d file(s) in the query, total size: %s",
 				successfulFiles, humanReadableSize(sumSizes(fileSizes)))
@@ -170,7 +169,7 @@ func (s *DeepseekServer) handleAskDeepseek(ctx context.Context, req mcp.CallTool
 			s.logger.Warn("No files were successfully read to include in the query")
 		}
 	}
-	
+
 	chatMessages[1].Content = finalQuery
 
 	requestPayload := &deepseek.ChatCompletionRequest{
@@ -272,8 +271,8 @@ func (s *DeepseekServer) handleDeepseekBalance(ctx context.Context, req mcp.Call
 func (s *DeepseekServer) handleTokenEstimate(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	s.logger.Info("Estimating token count")
 
-	text := req.GetString("text")
-	filePath := req.GetString("file_path")
+	text := req.GetString("text", "")          // Added default value
+	filePath := req.GetString("file_path", "") // Added default value
 
 	var estimatedTokens int
 	var sourceType string
@@ -337,7 +336,6 @@ func getLoggerFromContext(ctx context.Context) Logger {
 	return NewLogger(LevelInfo)
 }
 
-
 // Helper function to format the availability status
 func getAvailabilityStatus(isAvailable bool) string {
 	if isAvailable {
@@ -385,7 +383,7 @@ func (s *DeepseekServer) executeDeepseekRequest(ctx context.Context, model strin
 		s.config.MaxBackoff,
 		operation,
 		IsRetryableError, // Using the IsRetryableError from retry.go
-		s.logger, // Changed to s.logger
+		s.logger,         // Changed to s.logger
 	)
 
 	if err != nil {
