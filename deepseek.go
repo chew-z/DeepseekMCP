@@ -9,20 +9,19 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	
+
 	"github.com/cohesion-org/deepseek-go"
-	"github.com/gomcpgo/mcp/pkg/protocol"
+	mcp "github.com/mark3labs/mcp-go/mcp" // Changed import
 )
 
 // DeepseekServer implements the ToolHandler interface for DeepSeek API interactions
 type DeepseekServer struct {
-	config  *Config
-	client  *deepseek.Client
-	models  []DeepseekModelInfo   // Dynamically discovered models
-	modelsMu sync.RWMutex         // Mutex for thread-safe model access
+	config   *Config
+	client   *deepseek.Client
+	models   []DeepseekModelInfo // Dynamically discovered models
+	modelsMu sync.RWMutex        // Mutex for thread-safe model access
+	logger   Logger              // Added
 }
-
-
 
 // NewDeepseekServer creates a new DeepseekServer with the provided configuration
 func NewDeepseekServer(ctx context.Context, config *Config) (*DeepseekServer, error) {
@@ -34,23 +33,19 @@ func NewDeepseekServer(ctx context.Context, config *Config) (*DeepseekServer, er
 		return nil, errors.New("DeepSeek API key is required")
 	}
 
-	// Initialize the DeepSeek client
 	client := deepseek.NewClient(config.DeepseekAPIKey)
 	
-	// No error is returned by NewClient in the current library version
+	logger := getLoggerFromContext(ctx) // Get logger instance
 
-	// Create a simplified DeepseekServer without cache storage
 	server := &DeepseekServer{
 		config: config,
 		client: client,
+		logger: logger, // Initialize logger
 	}
 	
-	// Discover available models at startup
 	err := server.discoverModels(ctx)
 	if err != nil {
-		// Log warning but continue - we'll use fallback models if needed
-		logger := getLoggerFromContext(ctx)
-		logger.Warn("Failed to discover DeepSeek models, will use fallback models: %v", err)
+		server.logger.Warn("Failed to discover DeepSeek models, will use fallback models: %v", err) // Use s.logger
 	}
 	
 	return server, nil
@@ -107,86 +102,231 @@ func (s *DeepseekServer) formatModelName(modelID string) string {
 	return strings.Join(parts, " ")
 }
 
-// ListTools implements the ToolHandler interface for DeepseekServer
-func (s *DeepseekServer) ListTools(ctx context.Context) (*protocol.ListToolsResponse, error) {
-	tools := []protocol.Tool{
-		{
-			Name:        "deepseek_ask",
-			Description: "Use DeepSeek's AI model to ask about complex coding problems",
-			InputSchema: json.RawMessage(`{
-				"type": "object",
-				"properties": {
-					"query": {
-						"type": "string",
-						"description": "The coding problem that we are asking DeepSeek AI to work on [question + code]"
-					},
-					"model": {
-						"type": "string",
-						"description": "Optional: Specific DeepSeek model to use (overrides default configuration)"
-					},
-					"systemPrompt": {
-						"type": "string",
-						"description": "Optional: Custom system prompt to use for this request (overrides default configuration)"
-					},
-					"file_paths": {
-						"type": "array",
-						"items": {
-							"type": "string"
-						},
-						"description": "Optional: Paths to files to include in the request context"
-					},
-					"json_mode": {
-						"type": "boolean",
-						"description": "Optional: Enable JSON mode to receive structured JSON responses. Set to true when you expect JSON output."
-					}
-				},
-				"required": ["query"]
-			}`),
-		},
-		{
-			Name:        "deepseek_models",
-			Description: "List available DeepSeek models with descriptions",
-			InputSchema: json.RawMessage(`{
-				"type": "object",
-				"properties": {},
-				"required": []
-			}`),
-		},
-		{
-			Name:        "deepseek_balance",
-			Description: "Check your DeepSeek API account balance",
-			InputSchema: json.RawMessage(`{
-				"type": "object",
-				"properties": {},
-				"required": []
-			}`),
-		},
-		{
-			Name:        "deepseek_token_estimate",
-			Description: "Estimate the number of tokens in text or a file",
-			InputSchema: json.RawMessage(`{
-				"type": "object",
-				"properties": {
-					"text": {
-						"type": "string",
-						"description": "Text to estimate token count for"
-					},
-					"file_path": {
-						"type": "string",
-						"description": "Path to file to estimate token count for"
-					}
-				},
-				"required": []
-			}`),
-		},
+// --- New Tool Handlers ---
+
+// handleAskDeepseek handles requests to the ask_deepseek tool
+func (s *DeepseekServer) handleAskDeepseek(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.logger.Info("Handling deepseek_ask request")
+
+	query, err := req.RequireString("query")
+	if err != nil {
+		s.logger.Error("Missing required 'query' parameter: %v", err)
+		return mcp.NewToolResultError("Missing required 'query' parameter: " + err.Error()), nil
 	}
 
-	return &protocol.ListToolsResponse{
-		Tools: tools,
-	}, nil
+	modelName := s.config.DeepseekModel
+	if customModel := req.GetString("model"); customModel != "" {
+		if err := s.ValidateModelID(customModel); err != nil {
+			s.logger.Error("Invalid model requested: %v", err)
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid model specified: %v", err)), nil
+		}
+		s.logger.Info("Using request-specific model: %s", customModel)
+		modelName = customModel
+	}
+
+	systemPrompt := s.config.DeepseekSystemPrompt
+	if customPrompt := req.GetString("systemPrompt"); customPrompt != "" {
+		s.logger.Info("Using request-specific system prompt")
+		systemPrompt = customPrompt
+	}
+
+	filePaths := req.GetStringArray("file_paths")
+
+	jsonMode := req.GetBool("json_mode")
+    if jsonMode {
+        s.logger.Info("JSON mode is enabled via request")
+    }
+
+	chatMessages := []deepseek.ChatCompletionMessage{
+		{Role: deepseek.ChatMessageRoleSystem, Content: systemPrompt},
+		{Role: deepseek.ChatMessageRoleUser, Content: query},
+	}
+
+	finalQuery := query
+	if len(filePaths) > 0 {
+		s.logger.Info("Processing %d file_paths for context", len(filePaths))
+		fileContents := "\n\n# Reference Files\n"
+		successfulFiles := 0
+		var fileSizes []int64
+		
+		for _, filePath := range filePaths {
+			contentBytes, err := readFile(filePath)
+			if err != nil {
+				s.logger.Error("Failed to read file %s: %v", filePath, err)
+				continue
+			}
+			successfulFiles++
+			fileSizes = append(fileSizes, int64(len(contentBytes)))
+			language := getLanguageFromPath(filePath)
+			fileContents += fmt.Sprintf("\n\n## %s\n\n```%s\n%s\n```", 
+				filepath.Base(filePath), language, string(contentBytes))
+		}
+		
+		if successfulFiles > 0 {
+			s.logger.Info("Including %d file(s) in the query, total size: %s",
+				successfulFiles, humanReadableSize(sumSizes(fileSizes)))
+			finalQuery = query + fileContents
+		} else {
+			s.logger.Warn("No files were successfully read to include in the query")
+		}
+	}
+	
+	chatMessages[1].Content = finalQuery
+
+	requestPayload := &deepseek.ChatCompletionRequest{
+		Model:       modelName,
+		Messages:    chatMessages,
+		Temperature: s.config.DeepseekTemperature,
+		JSONMode:    jsonMode,
+	}
+
+	s.logger.Debug("Using temperature: %v for model %s. JSON mode: %v", s.config.DeepseekTemperature, modelName, jsonMode)
+
+	response, err := s.client.CreateChatCompletion(ctx, requestPayload)
+	if err != nil {
+		s.logger.Error("DeepSeek API error: %v", err)
+		errorMsg := fmt.Sprintf("Error from DeepSeek API: %v", err)
+		if len(filePaths) > 0 {
+			errorMsg += fmt.Sprintf("\n\nThe request included %d file(s).", len(filePaths))
+		}
+		return mcp.NewToolResultError(errorMsg), nil
+	}
+
+	var responseContent string
+	if len(response.Choices) > 0 {
+		responseContent = response.Choices[0].Message.Content
+	}
+	if responseContent == "" {
+		s.logger.Warn("DeepSeek model returned an empty response.")
+		responseContent = "The DeepSeek model returned an empty response. This might indicate that the model couldn't generate an appropriate response for your query. Please try rephrasing your question or providing more context."
+	}
+	return mcp.NewToolResultText(responseContent), nil
+}
+
+// handleDeepseekModels handles requests to the deepseek_models tool
+func (s *DeepseekServer) handleDeepseekModels(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.logger.Info("Listing available DeepSeek models")
+
+	models := s.GetAvailableDeepseekModels()
+	if len(models) == 0 {
+		s.logger.Warn("No models available, attempting to refresh from API")
+		err := s.discoverModels(ctx)
+		if err != nil {
+			s.logger.Error("Failed to refresh models from API: %v", err)
+		} else {
+			models = s.GetAvailableDeepseekModels()
+		}
+	}
+
+	var formattedContent strings.Builder
+	writeStringf := func(format string, args ...interface{}) {
+		formattedContent.WriteString(fmt.Sprintf(format, args...))
+	}
+
+	writeStringf("# Available DeepSeek Models\n\n")
+	for _, model := range models {
+		writeStringf("## %s\n", model.Name)
+		writeStringf("- ID: `%s`\n", model.ID)
+		writeStringf("- Description: %s\n\n", model.Description)
+	}
+	writeStringf("## Usage\n")
+	writeStringf("You can specify a model ID in the `model` parameter when using the `deepseek_ask` tool:\n")
+	writeStringf("```json\n{\n  \"query\": \"Your question here\",\n  \"model\": \"deepseek-chat\"\n}\n```\n")
+
+	return mcp.NewToolResultText(formattedContent.String()), nil
+}
+
+// handleDeepseekBalance handles requests to the deepseek_balance tool
+func (s *DeepseekServer) handleDeepseekBalance(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.logger.Info("Checking DeepSeek API balance")
+
+	balanceResponse, err := deepseek.GetBalance(s.client, ctx)
+	if err != nil {
+		s.logger.Error("Failed to get balance from DeepSeek API: %v", err)
+		return mcp.NewToolResultError(fmt.Sprintf("Error checking balance: %v", err)), nil
+	}
+
+	var formattedContent strings.Builder
+	formattedContent.WriteString("# DeepSeek API Balance Information\n\n")
+	formattedContent.WriteString(fmt.Sprintf("**Account Status:** %s\n\n", getAvailabilityStatus(balanceResponse.IsAvailable)))
+
+	if len(balanceResponse.BalanceInfos) > 0 {
+		formattedContent.WriteString("## Balance Details\n\n")
+		formattedContent.WriteString("| Currency | Total Balance | Granted Balance | Topped-up Balance |\n")
+		formattedContent.WriteString("|----------|--------------|----------------|------------------|\n")
+		for _, balance := range balanceResponse.BalanceInfos {
+			formattedContent.WriteString(fmt.Sprintf("| %s | %s | %s | %s |\n",
+				balance.Currency, balance.TotalBalance, balance.GrantedBalance, balance.ToppedUpBalance))
+		}
+	} else {
+		formattedContent.WriteString("*No balance details available*\n")
+	}
+	formattedContent.WriteString("\n## Usage Information\n\n")
+	formattedContent.WriteString("To top up your account or check more detailed usage statistics, ")
+	formattedContent.WriteString("please visit the [DeepSeek Platform](https://platform.deepseek.com).\n")
+
+	return mcp.NewToolResultText(formattedContent.String()), nil
+}
+
+// handleTokenEstimate handles requests to the deepseek_token_estimate tool
+func (s *DeepseekServer) handleTokenEstimate(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.logger.Info("Estimating token count")
+
+	text := req.GetString("text")
+	filePath := req.GetString("file_path")
+
+	var estimatedTokens int
+	var sourceType string
+	var sourceName string
+	var contentToEstimate string
+
+	if filePath != "" {
+		fileContentBytes, err := readFile(filePath)
+		if err != nil {
+			s.logger.Error("Failed to read file for token estimation %s: %v", filePath, err)
+			return mcp.NewToolResultError(fmt.Sprintf("Error reading file: %v", err)), nil
+		}
+		contentToEstimate = string(fileContentBytes)
+		sourceType = "file"
+		sourceName = filepath.Base(filePath)
+		estimate := deepseek.EstimateTokenCount(contentToEstimate)
+		estimatedTokens = estimate.EstimatedTokens
+		s.logger.Info("Estimated %d tokens for file %s", estimatedTokens, filePath)
+	} else if text != "" {
+		contentToEstimate = text
+		sourceType = "text"
+		sourceName = "provided input"
+		estimate := deepseek.EstimateTokenCount(contentToEstimate)
+		estimatedTokens = estimate.EstimatedTokens
+		s.logger.Info("Estimated %d tokens for provided text", estimatedTokens)
+	} else {
+		s.logger.Warn("handleTokenEstimate called without 'text' or 'file_path'")
+		return mcp.NewToolResultError("Please provide either 'text' or 'file_path' parameter"), nil
+	}
+
+	var formattedResponse strings.Builder
+	formattedResponse.WriteString("# Token Estimation Results\n\n")
+	formattedResponse.WriteString(fmt.Sprintf("**Source Type:** %s\n", sourceType))
+	formattedResponse.WriteString(fmt.Sprintf("**Source:** %s\n", sourceName))
+	formattedResponse.WriteString(fmt.Sprintf("**Estimated Token Count:** %d\n\n", estimatedTokens))
+	contentSize := len(contentToEstimate)
+	charCount := len([]rune(contentToEstimate))
+	formattedResponse.WriteString("## Content Statistics\n\n")
+	formattedResponse.WriteString(fmt.Sprintf("- **Byte Size:** %s (%d bytes)\n", humanReadableSize(int64(contentSize)), contentSize))
+	formattedResponse.WriteString(fmt.Sprintf("- **Character Count:** %d characters\n", charCount))
+	if charCount > 0 {
+		formattedResponse.WriteString(fmt.Sprintf("- **Tokens per Character Ratio:** %.2f tokens/char\n", float64(estimatedTokens)/float64(charCount)))
+	}
+	formattedResponse.WriteString("\n## Note\n\n")
+	formattedResponse.WriteString("*This is an estimation and may not exactly match the token count used by the API. ")
+	formattedResponse.WriteString("Actual token usage can vary based on the model and specific tokenization algorithm.*\n")
+
+	return mcp.NewToolResultText(formattedResponse.String()), nil
 }
 
 // getLoggerFromContext safely extracts a logger from the context or creates a new one
+// This assumes loggerKey and Logger type are defined (e.g., in main.go or a shared types.go)
+// and NewLogger, LevelInfo are available.
 func getLoggerFromContext(ctx context.Context) Logger {
 	loggerValue := ctx.Value(loggerKey)
 	if loggerValue != nil {
@@ -194,311 +334,9 @@ func getLoggerFromContext(ctx context.Context) Logger {
 			return l
 		}
 	}
-	// Create a new logger if one isn't in the context or type assertion fails
 	return NewLogger(LevelInfo)
 }
 
-// createErrorResponse creates a standardized error response
-func createErrorResponse(message string) *protocol.CallToolResponse {
-	return &protocol.CallToolResponse{
-		IsError: true,
-		Content: []protocol.ToolContent{
-			{
-				Type: "text",
-				Text: message,
-			},
-		},
-	}
-}
-
-// CallTool implements the ToolHandler interface for DeepseekServer
-func (s *DeepseekServer) CallTool(ctx context.Context, req *protocol.CallToolRequest) (*protocol.CallToolResponse, error) {
-	switch req.Name {
-	case "deepseek_ask":
-		return s.handleAskDeepseek(ctx, req)
-	case "deepseek_models":
-		return s.handleDeepseekModels(ctx)
-	case "deepseek_balance":
-		return s.handleDeepseekBalance(ctx)
-	case "deepseek_token_estimate":
-		return s.handleTokenEstimate(ctx, req)
-	default:
-		return createErrorResponse(fmt.Sprintf("unknown tool: %s", req.Name)), nil
-	}
-}
-
-// handleAskDeepseek handles requests to the ask_deepseek tool
-func (s *DeepseekServer) handleAskDeepseek(ctx context.Context, req *protocol.CallToolRequest) (*protocol.CallToolResponse, error) {
-	logger := getLoggerFromContext(ctx)
-
-	// Extract and validate query parameter (required)
-	query, ok := req.Arguments["query"].(string)
-	if !ok {
-		return createErrorResponse("query must be a string"), nil
-	}
-
-	// Extract optional model parameter
-	modelName := s.config.DeepseekModel
-	if customModel, ok := req.Arguments["model"].(string); ok && customModel != "" {
-		// Validate the custom model
-		if err := s.ValidateModelID(customModel); err != nil {
-			logger.Error("Invalid model requested: %v", err)
-			return createErrorResponse(fmt.Sprintf("Invalid model specified: %v", err)), nil
-		}
-		logger.Info("Using request-specific model: %s", customModel)
-		modelName = customModel
-	}
-
-	// Extract optional systemPrompt parameter
-	systemPrompt := s.config.DeepseekSystemPrompt
-	if customPrompt, ok := req.Arguments["systemPrompt"].(string); ok && customPrompt != "" {
-		logger.Info("Using request-specific system prompt")
-		systemPrompt = customPrompt
-	}
-
-	// Extract file paths if provided
-	var filePaths []string
-	if filePathsRaw, ok := req.Arguments["file_paths"].([]interface{}); ok {
-		for _, pathRaw := range filePathsRaw {
-			if path, ok := pathRaw.(string); ok {
-				filePaths = append(filePaths, path)
-			}
-		}
-	}
-
-	// Extract optional JSON mode parameter
-	jsonMode := false
-	if jsonModeRaw, ok := req.Arguments["json_mode"].(bool); ok {
-		jsonMode = jsonModeRaw
-		logger.Info("JSON mode is enabled: %v", jsonMode)
-	}
-
-
-	// Create ChatCompletionMessage from user query and system prompt
-	chatMessages := []deepseek.ChatCompletionMessage{
-		{
-			Role:    deepseek.ChatMessageRoleSystem,
-			Content: systemPrompt,
-		},
-		{
-			Role:    deepseek.ChatMessageRoleUser,
-			Content: query,
-		},
-	}
-
-	// Create the request
-	request := &deepseek.ChatCompletionRequest{
-		Model:       modelName,
-		Messages:    chatMessages,
-		Temperature: s.config.DeepseekTemperature,
-		JSONMode:    jsonMode,
-	}
-
-	// Log the temperature setting
-	logger.Debug("Using temperature: %v for model %s", s.config.DeepseekTemperature, modelName)
-
-	// Add file contents if provided
-	if len(filePaths) > 0 {
-		// First, gather file contents to be included in the prompt
-		fileContents := "\n\n# Reference Files\n"
-		successfulFiles := 0
-		fileSizes := []int64{}
-		
-		for _, filePath := range filePaths {
-			// Read file content using our readFile function
-			content, err := readFile(filePath)
-			if err != nil {
-				logger.Error("Failed to read file %s: %v", filePath, err)
-				continue
-			}
-			
-			// Record successful file read and size
-			successfulFiles++
-			fileSizes = append(fileSizes, int64(len(content)))
-			
-			// Get language extension for markdown highlighting
-			language := getLanguageFromPath(filePath)
-			
-			// Add file content to the combined contents with file name as header and proper markdown formatting
-			fileContents += fmt.Sprintf("\n\n## %s\n\n```%s\n%s\n```", 
-				filepath.Base(filePath), language, string(content))
-		}
-		
-		// Log some statistics about the files
-		logger.Info("Including %d file(s) in the query, total size: %s", 
-			successfulFiles, humanReadableSize(sumSizes(fileSizes)))
-		
-		// Create a chat request with file contents embedded in the query
-		if successfulFiles > 0 {
-			query = query + fileContents
-		} else {
-			logger.Warn("No files were successfully read to include in the query")
-		}
-	}
-	
-	// Update the request with the full query (either original or with file contents)
-	request.Messages[1].Content = query
-	
-	// Send the request to the DeepSeek API
-	response, err := s.client.CreateChatCompletion(ctx, request)
-	if err != nil {
-		logger.Error("DeepSeek API error: %v", err)
-		errorMsg := fmt.Sprintf("Error from DeepSeek API: %v", err)
-		
-		// Include additional information in the error response
-		if len(filePaths) > 0 {
-			errorMsg += fmt.Sprintf("\n\nThe request included %d file(s).", len(filePaths))
-		}
-		
-		return createErrorResponse(errorMsg), nil
-	}
-	
-	return s.formatResponse(response), nil
-}
-
-
-
-// handleTokenEstimate handles requests to the deepseek_token_estimate tool
-func (s *DeepseekServer) handleTokenEstimate(ctx context.Context, req *protocol.CallToolRequest) (*protocol.CallToolResponse, error) {
-	logger := getLoggerFromContext(ctx)
-	logger.Info("Estimating token count")
-
-	// Check if we have text or file_path
-	text, hasText := req.Arguments["text"].(string)
-	filePath, hasFilePath := req.Arguments["file_path"].(string)
-
-	// Initialize variables for the response
-	var estimatedTokens int
-	var sourceType string
-	var sourceName string
-	var content string
-
-	// Handle input from file path
-	if hasFilePath && filePath != "" {
-		// Read file content
-		fileContent, err := readFile(filePath)
-		if err != nil {
-			logger.Error("Failed to read file: %v", err)
-			return createErrorResponse(fmt.Sprintf("Error reading file: %v", err)), nil
-		}
-
-		// Convert to string for estimation
-		content = string(fileContent)
-		sourceType = "file"
-		sourceName = filepath.Base(filePath)
-
-		// Estimate tokens
-		estimate := deepseek.EstimateTokenCount(content)
-		estimatedTokens = estimate.EstimatedTokens
-
-		logger.Info("Estimated %d tokens for file %s", estimatedTokens, filePath)
-	} else if hasText && text != "" {
-		// Estimate tokens directly from the provided text
-		content = text
-		sourceType = "text"
-		sourceName = "provided input"
-
-		// Estimate tokens
-		estimate := deepseek.EstimateTokenCount(content)
-		estimatedTokens = estimate.EstimatedTokens
-
-		logger.Info("Estimated %d tokens for provided text", estimatedTokens)
-	} else {
-		// Neither text nor file_path provided
-		return createErrorResponse("Please provide either 'text' or 'file_path' parameter"), nil
-	}
-
-	// Create a formatted response
-	var formattedContent strings.Builder
-
-	// Write the header
-	formattedContent.WriteString("# Token Estimation Results\n\n")
-
-	// Write the summary
-	formattedContent.WriteString(fmt.Sprintf("**Source Type:** %s\n", sourceType))
-	formattedContent.WriteString(fmt.Sprintf("**Source:** %s\n", sourceName))
-	formattedContent.WriteString(fmt.Sprintf("**Estimated Token Count:** %d\n\n", estimatedTokens))
-
-	// Add size information
-	contentSize := len(content)
-	charCount := len([]rune(content))
-
-	formattedContent.WriteString("## Content Statistics\n\n")
-	formattedContent.WriteString(fmt.Sprintf("- **Byte Size:** %s (%d bytes)\n", humanReadableSize(int64(contentSize)), contentSize))
-	formattedContent.WriteString(fmt.Sprintf("- **Character Count:** %d characters\n", charCount))
-	if charCount > 0 {
-		formattedContent.WriteString(fmt.Sprintf("- **Tokens per Character Ratio:** %.2f tokens/char\n", float64(estimatedTokens)/float64(charCount)))
-	}
-
-	// Add usage note
-	formattedContent.WriteString("\n## Note\n\n")
-	formattedContent.WriteString("*This is an estimation and may not exactly match the token count used by the API. ")
-	formattedContent.WriteString("Actual token usage can vary based on the model and specific tokenization algorithm.*\n")
-
-	// Return the response
-	return &protocol.CallToolResponse{
-		Content: []protocol.ToolContent{
-			{
-				Type: "text",
-				Text: formattedContent.String(),
-			},
-		},
-	}, nil
-}
-
-// handleDeepseekBalance handles requests to the deepseek_balance tool
-func (s *DeepseekServer) handleDeepseekBalance(ctx context.Context) (*protocol.CallToolResponse, error) {
-	logger := getLoggerFromContext(ctx)
-	logger.Info("Checking DeepSeek API balance")
-
-	// Get balance information from the API
-	balanceResponse, err := deepseek.GetBalance(s.client, ctx)
-	if err != nil {
-		logger.Error("Failed to get balance from DeepSeek API: %v", err)
-		return createErrorResponse(fmt.Sprintf("Error checking balance: %v", err)), nil
-	}
-
-	// Create a formatted response
-	var formattedContent strings.Builder
-
-	// Write the header
-	formattedContent.WriteString("# DeepSeek API Balance Information\n\n")
-
-	// Add availability status
-	formattedContent.WriteString(fmt.Sprintf("**Account Status:** %s\n\n", 
-		getAvailabilityStatus(balanceResponse.IsAvailable)))
-
-	// If there are balance details, add them
-	if len(balanceResponse.BalanceInfos) > 0 {
-		formattedContent.WriteString("## Balance Details\n\n")
-		formattedContent.WriteString("| Currency | Total Balance | Granted Balance | Topped-up Balance |\n")
-		formattedContent.WriteString("|----------|--------------|----------------|------------------|\n")
-
-		for _, balance := range balanceResponse.BalanceInfos {
-			formattedContent.WriteString(fmt.Sprintf("| %s | %s | %s | %s |\n",
-				balance.Currency,
-				balance.TotalBalance,
-				balance.GrantedBalance,
-				balance.ToppedUpBalance))
-		}
-	} else {
-		formattedContent.WriteString("*No balance details available*\n")
-	}
-
-	// Add usage information
-	formattedContent.WriteString("\n## Usage Information\n\n")
-	formattedContent.WriteString("To top up your account or check more detailed usage statistics, ")
-	formattedContent.WriteString("please visit the [DeepSeek Platform](https://platform.deepseek.com).\n")
-
-	return &protocol.CallToolResponse{
-		Content: []protocol.ToolContent{
-			{
-				Type: "text",
-				Text: formattedContent.String(),
-			},
-		},
-	}, nil
-}
 
 // Helper function to format the availability status
 func getAvailabilityStatus(isAvailable bool) string {
@@ -508,90 +346,9 @@ func getAvailabilityStatus(isAvailable bool) string {
 	return "❌ Unavailable (Insufficient balance for API calls)"
 }
 
-// handleDeepseekModels handles requests to the deepseek_models tool
-func (s *DeepseekServer) handleDeepseekModels(ctx context.Context) (*protocol.CallToolResponse, error) {
-	logger := getLoggerFromContext(ctx)
-	logger.Info("Listing available DeepSeek models")
-
-	// Get available models (dynamically discovered or fallback)
-	models := s.GetAvailableDeepseekModels()
-	
-	// Try to refresh the models list if it's empty
-	if len(models) == 0 {
-		logger.Warn("No models available, attempting to refresh from API")
-		err := s.discoverModels(ctx)
-		if err != nil {
-			logger.Error("Failed to refresh models from API: %v", err)
-		} else {
-			// Get the refreshed models
-			models = s.GetAvailableDeepseekModels()
-		}
-	}
-
-	// Create a formatted response using strings.Builder with error handling
-	var formattedContent strings.Builder
-
-	// Define a helper function to write with error checking
-	writeStringf := func(format string, args ...interface{}) error {
-		_, err := formattedContent.WriteString(fmt.Sprintf(format, args...))
-		return err
-	}
-
-	// Write the header
-	if err := writeStringf("# Available DeepSeek Models\n\n"); err != nil {
-		logger.Error("Error writing to response: %v", err)
-		return createErrorResponse("Error generating model list"), nil
-	}
-
-	// Write each model's information
-	for _, model := range models {
-		if err := writeStringf("## %s\n", model.Name); err != nil {
-			logger.Error("Error writing to response: %v", err)
-			return createErrorResponse("Error generating model list"), nil
-		}
-
-		// Add basic model info
-		if err := writeStringf("- ID: `%s`\n", model.ID); err != nil {
-			logger.Error("Error writing to response: %v", err)
-			return createErrorResponse("Error generating model list"), nil
-		}
-
-		if err := writeStringf("- Description: %s\n\n", model.Description); err != nil {
-			logger.Error("Error writing to response: %v", err)
-			return createErrorResponse("Error generating model list"), nil
-		}
-	}
-
-	// Add usage hint
-	if err := writeStringf("## Usage\n"); err != nil {
-		logger.Error("Error writing to response: %v", err)
-		return createErrorResponse("Error generating model list"), nil
-	}
-
-	if err := writeStringf("You can specify a model ID in the `model` parameter when using the `deepseek_ask` tool:\n"); err != nil {
-		logger.Error("Error writing to response: %v", err)
-		return createErrorResponse("Error generating model list"), nil
-	}
-
-	if err := writeStringf("```json\n{\n  \"query\": \"Your question here\",\n  \"model\": \"deepseek-chat\"\n}\n```\n"); err != nil {
-		logger.Error("Error writing to response: %v", err)
-		return createErrorResponse("Error generating model list"), nil
-	}
-
-	return &protocol.CallToolResponse{
-		Content: []protocol.ToolContent{
-			{
-				Type: "text",
-				Text: formattedContent.String(),
-			},
-		},
-	}, nil
-}
-
 // executeDeepseekRequest makes the request to the DeepSeek API with retry capability
 func (s *DeepseekServer) executeDeepseekRequest(ctx context.Context, model string, query string) (*deepseek.ChatCompletionResponse, error) {
-	logger := getLoggerFromContext(ctx)
-
+	// logger := getLoggerFromContext(ctx) // Old line, changed to s.logger
 	var response *deepseek.ChatCompletionResponse
 
 	// Define the operation to retry
@@ -613,7 +370,7 @@ func (s *DeepseekServer) executeDeepseekRequest(ctx context.Context, model strin
 		}
 		response, err = s.client.CreateChatCompletion(timeoutCtx, request)
 		if err != nil {
-			logger.Error("DeepSeek API error: %v", err)
+			s.logger.Error("DeepSeek API error: %v", err) // Changed to s.logger
 			return err
 		}
 
@@ -628,7 +385,7 @@ func (s *DeepseekServer) executeDeepseekRequest(ctx context.Context, model strin
 		s.config.MaxBackoff,
 		operation,
 		IsRetryableError, // Using the IsRetryableError from retry.go
-		logger,
+		s.logger, // Changed to s.logger
 	)
 
 	if err != nil {
@@ -638,28 +395,7 @@ func (s *DeepseekServer) executeDeepseekRequest(ctx context.Context, model strin
 	return response, nil
 }
 
-// formatResponse formats the DeepSeek API response
-func (s *DeepseekServer) formatResponse(resp *deepseek.ChatCompletionResponse) *protocol.CallToolResponse {
-	// Extract text from the response
-	var content string
-	if len(resp.Choices) > 0 {
-		content = resp.Choices[0].Message.Content
-	}
-
-	// Check for empty content and provide a fallback message
-	if content == "" {
-		content = "The DeepSeek model returned an empty response. This might indicate that the model couldn't generate an appropriate response for your query. Please try rephrasing your question or providing more context."
-	}
-
-	return &protocol.CallToolResponse{
-		Content: []protocol.ToolContent{
-			{
-				Type: "text",
-				Text: content,
-			},
-		},
-	}
-}
+// formatResponse was here, now removed.
 
 // Helper function to read a file
 // This is declared at package level so it can be used by other files in the package
