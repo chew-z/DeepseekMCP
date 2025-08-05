@@ -149,6 +149,12 @@ func (s *DeepseekServer) handleAskDeepseek(ctx context.Context, req mcp.CallTool
 		var fileSizes []int64
 
 		for _, filePath := range filePaths {
+			// Security check: Ensure file path is within allowed directories
+			if !isPathAllowed(filePath, allowedDirs) {
+				s.logger.Error("Attempted to access file outside allowed directories: %s", filePath)
+				continue
+			}
+
 			contentBytes, err := readFile(filePath)
 			if err != nil {
 				s.logger.Error("Failed to read file %s: %v", filePath, err)

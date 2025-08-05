@@ -52,3 +52,23 @@ func GetFileInfo(path string) (string, int64, error) {
 	mimeType := getMimeTypeFromPath(path)
 	return mimeType, info.Size(), nil
 }
+
+// isPathAllowed checks if a given file path is within the allowed directories.
+// This is a security measure to prevent arbitrary file system access.
+func isPathAllowed(path string, allowedDirs []string) bool {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+
+	for _, dir := range allowedDirs {
+		absDir, err := filepath.Abs(dir)
+		if err != nil {
+			continue // Skip invalid allowed directories
+		}
+		if strings.HasPrefix(absPath, absDir) {
+			return true
+		}
+	}
+	return false
+}

@@ -1,6 +1,6 @@
 module github.com/chew-z/DeepseekMCP
 
-go 1.24.2
+go 1.24.5
 
 require github.com/cohesion-org/deepseek-go v1.2.10
 
