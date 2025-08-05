@@ -96,19 +96,15 @@ func NewConfig() (*Config, error) {
 		temperature = float32(tempFloat)
 	}
 
-	// Read HTTP timeout (optional, defaults to 90 seconds)
+	// Read HTTP timeout (optional, defaults to 180 seconds)
 	timeoutStr := os.Getenv("DEEPSEEK_TIMEOUT")
-	timeout := 90 * time.Second
+	timeout := 180 * time.Second
 	if timeoutStr != "" {
-		// if no unit is provided, assume seconds
-		if _, err := strconv.Atoi(timeoutStr); err == nil {
-			timeoutStr += "s"
-		}
-		var err error
-		timeout, err = time.ParseDuration(timeoutStr)
+		seconds, err := strconv.Atoi(timeoutStr)
 		if err != nil {
-			return nil, fmt.Errorf("invalid DEEPSEEK_TIMEOUT: %w", err)
+			return nil, fmt.Errorf("invalid DEEPSEEK_TIMEOUT value '%s': must be an integer representing seconds: %w", timeoutStr, err)
 		}
+		timeout = time.Duration(seconds) * time.Second
 	}
 
 	// Read max retries (optional, defaults to 2)

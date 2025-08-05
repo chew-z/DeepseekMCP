@@ -33,6 +33,8 @@ func NewDeepseekServer(ctx context.Context, config *Config) (*DeepseekServer, er
 	}
 
 	client := deepseek.NewClient(config.DeepseekAPIKey)
+	// Unset DEEPSEEK_TIMEOUT to prevent the library from reading it
+	os.Unsetenv("DEEPSEEK_TIMEOUT")
 
 	logger := getLoggerFromContext(ctx) // Get logger instance
 
@@ -60,8 +62,10 @@ func (s *DeepseekServer) discoverModels(ctx context.Context) error {
 	logger := getLoggerFromContext(ctx)
 	logger.Info("Discovering available DeepSeek models from API")
 
-	// Get models from the API
-	apiModels, err := deepseek.ListAllModels(s.client, ctx)
+	// Get models from the API with timeout
+	timeoutCtx, cancel := context.WithTimeout(ctx, s.config.HTTPTimeout)
+	defer cancel()
+	apiModels, err := deepseek.ListAllModels(s.client, timeoutCtx)
 	if err != nil {
 		logger.Error("Failed to get models from DeepSeek API: %v", err)
 		return err
@@ -189,7 +193,11 @@ func (s *DeepseekServer) handleAskDeepseek(ctx context.Context, req mcp.CallTool
 
 		s.logger.Debug("Using temperature: %v for model %s. JSON mode: %v", s.config.DeepseekTemperature, modelName, jsonMode)
 
-		response, err := s.client.CreateChatCompletion(ctx, requestPayload)
+		// Create timeout context for the API call
+		timeoutCtx, cancel := context.WithTimeout(ctx, s.config.HTTPTimeout)
+		defer cancel()
+		
+		response, err := s.client.CreateChatCompletion(timeoutCtx, requestPayload)
 		if err != nil {
 			s.logger.Error("DeepSeek API error: %v", err)
 			errorMsg := fmt.Sprintf("Error from DeepSeek API: %v", err)
@@ -247,7 +255,9 @@ func (s *DeepseekServer) handleAskDeepseek(ctx context.Context, req mcp.CallTool
 	func (s *DeepseekServer) handleDeepseekBalance(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		s.logger.Info("Checking DeepSeek API balance")
 
-		balanceResponse, err := deepseek.GetBalance(s.client, ctx)
+		timeoutCtx, cancel := context.WithTimeout(ctx, s.config.HTTPTimeout)
+	defer cancel()
+	balanceResponse, err := deepseek.GetBalance(s.client, timeoutCtx)
 		if err != nil {
 			s.logger.Error("Failed to get balance from DeepSeek API: %v", err)
 			return mcp.NewToolResultError(fmt.Sprintf("Error checking balance: %v", err)), nil
