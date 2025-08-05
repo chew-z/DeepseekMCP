@@ -33,10 +33,10 @@ func NewConfig() (*Config, error) {
 		return nil, errors.New("DEEPSEEK_API_KEY environment variable is required")
 	}
 
-	// Read model (optional, defaults to "deepseek-chat")
+	// Read model (optional, defaults to "deepseek-reasoner")
 	model := os.Getenv("DEEPSEEK_MODEL")
 	if model == "" {
-		model = "deepseek-chat"
+		model = "deepseek-reasoner"
 	}
 
 	// Read system prompt (optional)
@@ -100,11 +100,15 @@ func NewConfig() (*Config, error) {
 	timeoutStr := os.Getenv("DEEPSEEK_TIMEOUT")
 	timeout := 90 * time.Second
 	if timeoutStr != "" {
-		timeoutInt, err := strconv.Atoi(timeoutStr)
+		// if no unit is provided, assume seconds
+		if _, err := strconv.Atoi(timeoutStr); err == nil {
+			timeoutStr += "s"
+		}
+		var err error
+		timeout, err = time.ParseDuration(timeoutStr)
 		if err != nil {
 			return nil, fmt.Errorf("invalid DEEPSEEK_TIMEOUT: %w", err)
 		}
-		timeout = time.Duration(timeoutInt) * time.Second
 	}
 
 	// Read max retries (optional, defaults to 2)

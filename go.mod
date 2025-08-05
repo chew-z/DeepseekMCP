@@ -2,9 +2,11 @@ module github.com/chew-z/DeepseekMCP
 
 go 1.24.5
 
-require github.com/cohesion-org/deepseek-go v1.2.10
+require github.com/cohesion-org/deepseek-go v1.3.2
 
 require github.com/joho/godotenv v1.5.1
+
+require github.com/ollama/ollama v0.6.5 // indirect
 
 require (
 	github.com/google/uuid v1.6.0 // indirect
