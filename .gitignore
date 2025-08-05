@@ -1,3 +1,4 @@
+.DS_Store
 bin/**
 .env
 go.sum
@@ -5,15 +6,6 @@ go.sum
 .aider*
 run_*
 .claude/**
-codemcp.toml
-system_prompt.txt
-code-review.md
-ClaudeCode.md
-CONVENTIONS.md
-CHANGES.md
-CHANGES-APPROACH.md
 CLAUDE.md
-EDIT-STEP_BY_STEP.md
-EDIT-FILE-GUIDE.md
-README-UPDATES.md
-*_CODE_REVIEW.md
+.gemini/**
+GEMINI.md
