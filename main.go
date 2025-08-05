@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	_ "github.com/joho/godotenv/autoload"
 	mcp "github.com/mark3labs/mcp-go/mcp"
@@ -18,6 +19,7 @@ func main() {
 	deepseekModelFlag := flag.String("deepseek-model", "", "DeepSeek model name (overrides env var)")
 	deepseekSystemPromptFlag := flag.String("deepseek-system-prompt", "", "System prompt (overrides env var)")
 	deepseekTemperatureFlag := flag.Float64("deepseek-temperature", -1, "Temperature setting (0.0-1.0, overrides env var)")
+	deepseekAllowedFilePathsFlag := flag.String("deepseek-allowed-file-paths", "", "Comma-separated list of allowed file paths for file operations (overrides env var)")
 	flag.Parse()
 
 	// Create application context with logger
@@ -52,6 +54,13 @@ func main() {
 		}
 		logger.Info("Overriding DeepSeek temperature with flag value: %v", *deepseekTemperatureFlag)
 		config.DeepseekTemperature = float32(*deepseekTemperatureFlag)
+	}
+
+	// Override allowed file paths if provided
+	if *deepseekAllowedFilePathsFlag != "" {
+		paths := strings.Split(*deepseekAllowedFilePathsFlag, ",")
+		logger.Info("Overriding DeepSeek allowed file paths with flag values: %v", paths)
+		config.AllowedFilePaths = paths
 	}
 
 	// Store config in context for error handler to access
@@ -138,9 +147,10 @@ func setupDeepseekServer(ctx context.Context, srv *server.MCPServer, config *Con
 	logger.Info("Registered DeepSeek tools and server in normal mode with model: %s", config.DeepseekModel) // Updated log message
 
 	// Log file handling configuration
-	logger.Info("File handling: max size %s, allowed types: %v",
+	logger.Info("File handling: max size %s, allowed types: %v, allowed paths: %v",
 		humanReadableSize(config.MaxFileSize),
-		config.AllowedFileTypes)
+		config.AllowedFileTypes,
+		config.AllowedFilePaths)
 
 	// Log a truncated version of the system prompt for security/brevity
 	promptPreview := config.DeepseekSystemPrompt

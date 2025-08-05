@@ -22,6 +22,7 @@ type Config struct {
 	MaxRetries           int
 	InitialBackoff       time.Duration
 	MaxBackoff           time.Duration
+	AllowedFilePaths     []string // New field for allowed file paths
 }
 
 // NewConfig creates a new configuration instance from environment variables
@@ -139,6 +140,19 @@ func NewConfig() (*Config, error) {
 		}
 	}
 
+	// Read allowed file paths (optional, defaults to current working directory)
+	allowedFilePathsStr := os.Getenv("DEEPSEEK_ALLOWED_FILE_PATHS")
+	var allowedFilePaths []string
+	if allowedFilePathsStr == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get current working directory: %w", err)
+		}
+		allowedFilePaths = []string{wd}
+	} else {
+		allowedFilePaths = strings.Split(allowedFilePathsStr, ",")
+	}
+
 	return &Config{
 		DeepseekAPIKey:       apiKey,
 		DeepseekModel:        model,
@@ -150,5 +164,6 @@ func NewConfig() (*Config, error) {
 		MaxRetries:           maxRetries,
 		InitialBackoff:       initialBackoff,
 		MaxBackoff:           maxBackoff,
+		AllowedFilePaths:     allowedFilePaths,
 	}, nil
 }
