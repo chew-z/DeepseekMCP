@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -52,9 +53,20 @@ type SimpleLogger struct {
 }
 
 // NewLogger creates a new logger with the specified level
-func NewLogger(level LogLevel) Logger {
+func NewLogger(level string) Logger {
+	logLevel := LevelInfo // Default to Info
+	switch strings.ToUpper(level) {
+	case "DEBUG":
+		logLevel = LevelDebug
+	case "INFO":
+		logLevel = LevelInfo
+	case "WARN":
+		logLevel = LevelWarn
+	case "ERROR":
+		logLevel = LevelError
+	}
 	return &SimpleLogger{
-		level:  level,
+		level:  logLevel,
 		logger: log.New(os.Stderr, "", log.LstdFlags),
 	}
 }

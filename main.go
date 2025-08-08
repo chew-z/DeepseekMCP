@@ -20,18 +20,22 @@ func main() {
 	deepseekSystemPromptFlag := flag.String("deepseek-system-prompt", "", "System prompt (overrides env var)")
 	deepseekTemperatureFlag := flag.Float64("deepseek-temperature", -1, "Temperature setting (0.0-1.0, overrides env var)")
 	deepseekAllowedFilePathsFlag := flag.String("deepseek-allowed-file-paths", "", "Comma-separated list of allowed file paths for file operations (overrides env var)")
+	logLevelFlag := flag.String("log-level", "", "Log level (debug, info, warn, error), overrides DEEPSEEK_LOG_LEVEL")
 	flag.Parse()
-
-	// Create application context with logger
-	logger := NewLogger(LevelInfo)
-	ctx := context.WithValue(context.Background(), loggerKey, logger)
 
 	// Create configuration from environment variables
 	config, err := NewConfig()
 	if err != nil {
+		// If config fails, we can't create a logger from it, so use a default
+		logger := NewLogger("error")
+		ctx := context.WithValue(context.Background(), loggerKey, logger)
 		handleStartupError(ctx, err)
 		return
 	}
+
+	// Create application context with logger
+	logger := NewLogger(config.LogLevel)
+	ctx := context.WithValue(context.Background(), loggerKey, logger)
 
 	// Override with command-line flags if provided
 	// Model ID validation will happen after deepseekServer is initialized
@@ -61,6 +65,15 @@ func main() {
 		paths := strings.Split(*deepseekAllowedFilePathsFlag, ",")
 		logger.Info("Overriding DeepSeek allowed file paths with flag values: %v", paths)
 		config.AllowedFilePaths = paths
+	}
+
+	// Override log level if provided
+	if *logLevelFlag != "" {
+		logger.Info("Overriding log level with flag value: %s", *logLevelFlag)
+		config.LogLevel = *logLevelFlag
+		// Re-create logger with the new level
+		logger = NewLogger(config.LogLevel)
+		ctx = context.WithValue(context.Background(), loggerKey, logger)
 	}
 
 	// Store config in context for error handler to access
@@ -189,7 +202,7 @@ func handleStartupError(ctx context.Context, err error) {
 	logger, ok := loggerValue.(Logger)
 	if !ok {
 		// Fallback to a new logger if type assertion fails
-		logger = NewLogger(LevelError)
+		logger = NewLogger("error")
 	}
 	errorMsg := err.Error()
 

@@ -69,12 +69,12 @@ func (s *DeepseekServer) GetAvailableDeepseekModels() []DeepseekModelInfo {
 	s.modelsMu.RLock()
 	models := s.models
 	s.modelsMu.RUnlock()
-	
+
 	// If we have discovered models, return them
 	if len(models) > 0 {
 		return models
 	}
-	
+
 	// Otherwise, return fallback hardcoded models
 	return getFallbackDeepseekModels()
 }

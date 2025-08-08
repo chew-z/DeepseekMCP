@@ -23,6 +23,7 @@ type Config struct {
 	InitialBackoff       time.Duration
 	MaxBackoff           time.Duration
 	AllowedFilePaths     []string // New field for allowed file paths
+	LogLevel             string   // New field for log level
 }
 
 // NewConfig creates a new configuration instance from environment variables
@@ -96,7 +97,7 @@ func NewConfig() (*Config, error) {
 		temperature = float32(tempFloat)
 	}
 
-	// Read HTTP timeout (optional, defaults to 180 seconds)
+	// Read HTTP timeout (optional, defaults to 120 seconds)
 	timeoutStr := os.Getenv("DEEPSEEK_TIMEOUT")
 	timeout := 270 * time.Second // Default timeout
 	if timeoutStr != "" {
@@ -159,6 +160,12 @@ func NewConfig() (*Config, error) {
 		allowedFilePaths = strings.Split(allowedFilePathsStr, ",")
 	}
 
+	// Read log level (optional, defaults to "info")
+	logLevel := os.Getenv("DEEPSEEK_LOG_LEVEL")
+	if logLevel == "" {
+		logLevel = "info"
+	}
+
 	return &Config{
 		DeepseekAPIKey:       apiKey,
 		DeepseekModel:        model,
@@ -171,5 +178,6 @@ func NewConfig() (*Config, error) {
 		InitialBackoff:       initialBackoff,
 		MaxBackoff:           maxBackoff,
 		AllowedFilePaths:     allowedFilePaths,
+		LogLevel:             logLevel,
 	}, nil
 }

@@ -53,20 +53,20 @@ func RetryWithBackoff(
 ) error {
 	var err error
 	backoff := initialBackoff
-	
+
 	// Initialize random with current time
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		// If this is not the first attempt, log the retry
 		if attempt > 0 {
-			logger.Info("Retrying operation (attempt %d/%d) after %v delay", 
+			logger.Info("Retrying operation (attempt %d/%d) after %v delay",
 				attempt, maxRetries, backoff)
 		}
 
 		// Attempt the operation
 		err = operation()
-		
+
 		// If no error or the error is not classified as retryable, return
 		if err == nil || !errorClassifier(err) {
 			return err

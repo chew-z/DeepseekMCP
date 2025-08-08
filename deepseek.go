@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -16,7 +17,7 @@ import (
 // DeepseekServer implements the ToolHandler interface for DeepSeek API interactions
 type DeepseekServer struct {
 	config   *Config
-	client   *deepseek.Client
+	client   DeepseekAPI // Use the interface
 	models   []DeepseekModelInfo // Dynamically discovered models
 	modelsMu sync.RWMutex        // Mutex for thread-safe model access
 	logger   Logger              // Added
@@ -32,13 +33,16 @@ func NewDeepseekServer(ctx context.Context, config *Config) (*DeepseekServer, er
 		return nil, errors.New("DeepSeek API key is required")
 	}
 
-	client := deepseek.NewClient(config.DeepseekAPIKey)
+	// Create the real client and wrap it in the adapter
+	client := &realDeepseekClient{
+		client: deepseek.NewClient(config.DeepseekAPIKey),
+	}
 
 	logger := getLoggerFromContext(ctx) // Get logger instance
 
 	server := &DeepseekServer{
 		config: config,
-		client: client,
+		client: client, // Use the adapter
 		logger: logger, // Initialize logger
 	}
 
@@ -61,9 +65,24 @@ func (s *DeepseekServer) discoverModels(ctx context.Context) error {
 	logger.Info("Discovering available DeepSeek models from API")
 
 	// Get models from the API with timeout
-	timeoutCtx, cancel := context.WithTimeout(ctx, s.config.HTTPTimeout)
-	defer cancel()
-	apiModels, err := deepseek.ListAllModels(s.client, timeoutCtx)
+	var apiModels *deepseek.APIModels
+	operation := func() error {
+		timeoutCtx, cancel := context.WithTimeout(ctx, s.config.HTTPTimeout)
+		defer cancel()
+		var err error
+		apiModels, err = s.client.ListAllModels(timeoutCtx)
+		return err
+	}
+
+	err := RetryWithBackoff(
+		ctx,
+		s.config.MaxRetries,
+		s.config.InitialBackoff,
+		s.config.MaxBackoff,
+		operation,
+		IsRetryableError,
+		s.logger,
+	)
 	if err != nil {
 		logger.Error("Failed to get models from DeepSeek API: %v", err)
 		return err
@@ -150,13 +169,10 @@ func (s *DeepseekServer) handleAskDeepseek(ctx context.Context, req mcp.CallTool
 		successfulFiles := 0
 		var fileSizes []int64
 
-		// Define allowed directories for file access
-		allowedDirs := s.config.AllowedFilePaths
-
 		for _, filePath := range filePaths {
 			// Security check: Ensure file path is within allowed directories
-			if !isPathAllowed(filePath, allowedDirs) {
-				s.logger.Error("Attempted to access file outside allowed directories: %s", filePath)
+			if err := ValidateFilePath(filePath, s.config); err != nil {
+				s.logger.Warn("File validation failed for %s: %v", filePath, err)
 				continue
 			}
 
@@ -193,10 +209,24 @@ func (s *DeepseekServer) handleAskDeepseek(ctx context.Context, req mcp.CallTool
 	s.logger.Debug("Using temperature: %v for model %s. JSON mode: %v", s.config.DeepseekTemperature, modelName, jsonMode)
 
 	// Create timeout context for the API call
-	timeoutCtx, cancel := context.WithTimeout(ctx, s.config.HTTPTimeout)
-	defer cancel()
+	var response *deepseek.ChatCompletionResponse
+	operation := func() error {
+		timeoutCtx, cancel := context.WithTimeout(ctx, s.config.HTTPTimeout)
+		defer cancel()
+		var err error
+		response, err = s.client.CreateChatCompletion(timeoutCtx, requestPayload)
+		return err
+	}
 
-	response, err := s.client.CreateChatCompletion(timeoutCtx, requestPayload)
+	err = RetryWithBackoff(
+		ctx,
+		s.config.MaxRetries,
+		s.config.InitialBackoff,
+		s.config.MaxBackoff,
+		operation,
+		IsRetryableError,
+		s.logger,
+	)
 	if err != nil {
 		s.logger.Error("DeepSeek API error: %v", err)
 		errorMsg := fmt.Sprintf("Error from DeepSeek API: %v", err)
@@ -214,7 +244,120 @@ func (s *DeepseekServer) handleAskDeepseek(ctx context.Context, req mcp.CallTool
 		s.logger.Warn("DeepSeek model returned an empty response.")
 		responseContent = "The DeepSeek model returned an empty response. This might indicate that the model couldn't generate an appropriate response for your query. Please try rephrasing your question or providing more context."
 	}
+
+	// If JSON mode is enabled, validate and clean the response
+	if jsonMode {
+		cleanedJSON, err := extractStrictJSON(responseContent)
+		if err != nil {
+			s.logger.Error("JSON mode validation failed: %v. Original content: %s", err, responseContent)
+			return mcp.NewToolResultError(fmt.Sprintf("JSON mode validation failed: %v. The model returned content that could not be parsed as valid JSON. Original preview: %s", err, truncateString(responseContent, 100))), nil
+		}
+		return mcp.NewToolResultText(cleanedJSON), nil
+	}
+
 	return mcp.NewToolResultText(responseContent), nil
+}
+
+// extractStrictJSON attempts to find and extract a valid JSON object or array from a string.
+// It handles cases where the JSON is embedded within code fences (```json ... ```) or surrounded by other text.
+func extractStrictJSON(s string) (string, error) {
+	// Trim whitespace and backticks
+	trimmed := strings.TrimSpace(s)
+	trimmed = strings.TrimPrefix(trimmed, "```json")
+	trimmed = strings.TrimPrefix(trimmed, "```")
+	trimmed = strings.TrimSuffix(trimmed, "```")
+	trimmed = strings.TrimSpace(trimmed)
+
+	// Find the first occurrence of '{' or '['
+	startObject := strings.Index(trimmed, "{")
+	startArray := strings.Index(trimmed, "[")
+
+	var start int
+	if startObject == -1 && startArray == -1 {
+		return "", errors.New("no JSON object or array found in the response")
+	} else if startObject == -1 {
+		start = startArray
+	} else if startArray == -1 {
+		start = startObject
+	} else {
+		// Find the earliest start
+		if startObject < startArray {
+			start = startObject
+		} else {
+			start = startArray
+		}
+	}
+
+	// Find the corresponding closing bracket or brace
+	end := -1
+	if trimmed[start] == '{' {
+		end = findMatchingBrace(trimmed, start)
+	} else {
+		end = findMatchingBracket(trimmed, start)
+	}
+
+	if end == -1 {
+		return "", errors.New("could not find matching closing brace/bracket for JSON")
+	}
+
+	// Extract the potential JSON string
+	jsonStr := trimmed[start : end+1]
+
+	// Validate that the extracted string is valid JSON
+	var js json.RawMessage
+	if err := json.Unmarshal([]byte(jsonStr), &js); err != nil {
+		return "", fmt.Errorf("extracted content is not valid JSON: %w", err)
+	}
+
+	return jsonStr, nil
+}
+
+// findMatchingBrace finds the matching closing brace for an opening brace at a given position.
+func findMatchingBrace(s string, start int) int {
+	if s[start] != '{' {
+		return -1
+	}
+	depth := 0
+	for i := start; i < len(s); i++ {
+		switch s[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// findMatchingBracket finds the matching closing bracket for an opening bracket at a given position.
+func findMatchingBracket(s string, start int) int {
+	if s[start] != '[' {
+		return -1
+	}
+	depth := 0
+	for i := start; i < len(s); i++ {
+		switch s[i] {
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// truncateString truncates a string to a maximum length, adding an ellipsis if truncated.
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 // handleDeepseekModels handles requests to the deepseek_models tool
@@ -251,12 +394,27 @@ func (s *DeepseekServer) handleDeepseekModels(ctx context.Context, req mcp.CallT
 }
 
 // handleDeepseekBalance handles requests to the deepseek_balance tool
-	func (s *DeepseekServer) handleDeepseekBalance(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		s.logger.Info("Checking DeepSeek API balance")
+func (s *DeepseekServer) handleDeepseekBalance(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.logger.Info("Checking DeepSeek API balance")
 
+	var balanceResponse *deepseek.BalanceResponse
+	operation := func() error {
 		timeoutCtx, cancel := context.WithTimeout(ctx, s.config.HTTPTimeout)
 		defer cancel()
-		balanceResponse, err := deepseek.GetBalance(s.client, timeoutCtx)
+		var err error
+		balanceResponse, err = s.client.GetBalance(timeoutCtx)
+		return err
+	}
+
+	err := RetryWithBackoff(
+		ctx,
+		s.config.MaxRetries,
+		s.config.InitialBackoff,
+		s.config.MaxBackoff,
+		operation,
+		IsRetryableError,
+		s.logger,
+	)
 	if err != nil {
 		s.logger.Error("Failed to get balance from DeepSeek API: %v", err)
 		return mcp.NewToolResultError(fmt.Sprintf("Error checking balance: %v", err)), nil
@@ -297,10 +455,9 @@ func (s *DeepseekServer) handleTokenEstimate(ctx context.Context, req mcp.CallTo
 	var contentToEstimate string
 
 	if filePath != "" {
-		// Security check: Ensure file path is within allowed directories
-		if !isPathAllowed(filePath, s.config.AllowedFilePaths) {
-			s.logger.Error("Attempted to access file outside allowed directories: %s", filePath)
-			return mcp.NewToolResultError(fmt.Sprintf("Access to file path is denied: %s", filePath)), nil
+		if err := ValidateFilePath(filePath, s.config); err != nil {
+			s.logger.Warn("File validation failed for %s: %v", filePath, err)
+			return mcp.NewToolResultError(fmt.Sprintf("File validation failed: %v", err)), nil
 		}
 
 		fileContentBytes, err := readFile(filePath)
@@ -356,7 +513,7 @@ func getLoggerFromContext(ctx context.Context) Logger {
 			return l
 		}
 	}
-	return NewLogger(LevelInfo)
+	return NewLogger("info")
 }
 
 // Helper function to format the availability status
@@ -392,11 +549,15 @@ func getMimeTypeFromPath(path string) string {
 	case ".css":
 		return "text/css"
 	case ".js":
-		return "application/javascript"
+		return "text/javascript"
 	case ".json":
 		return "application/json"
 	case ".xml":
 		return "application/xml"
+	case ".yaml", ".yml":
+		return "text/x-yaml"
+	case ".toml":
+		return "text/x-toml"
 	case ".pdf":
 		return "application/pdf"
 	case ".png":
