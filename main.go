@@ -144,6 +144,18 @@ func setupDeepseekServer(ctx context.Context, srv *server.MCPServer, config *Con
 	)
 	srv.AddTool(tokenEstimateTool, deepseekServer.handleTokenEstimate)
 
+	for _, p := range Prompts {
+		prompt := mcp.NewPrompt(p.Name,
+			mcp.WithPromptDescription(p.Description),
+			mcp.WithArgument("problem_statement",
+				mcp.ArgumentDescription("The user's problem statement or question to be addressed."),
+				mcp.RequiredArgument(),
+			),
+		)
+		srv.AddPrompt(prompt, deepseekServer.promptHandler(p))
+	}
+	logger.Info("Registered %d prompts", len(Prompts))
+
 	logger.Info("Registered DeepSeek tools and server in normal mode with model: %s", config.DeepseekModel) // Updated log message
 
 	// Log file handling configuration
