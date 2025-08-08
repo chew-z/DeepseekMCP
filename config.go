@@ -98,13 +98,19 @@ func NewConfig() (*Config, error) {
 
 	// Read HTTP timeout (optional, defaults to 180 seconds)
 	timeoutStr := os.Getenv("DEEPSEEK_TIMEOUT")
-	timeout := 180 * time.Second
+	timeout := 270 * time.Second // Default timeout
 	if timeoutStr != "" {
-		seconds, err := strconv.Atoi(timeoutStr)
-		if err != nil {
-			return nil, fmt.Errorf("invalid DEEPSEEK_TIMEOUT value '%s': must be an integer representing seconds: %w", timeoutStr, err)
+		// Try to parse as an integer (seconds)
+		if seconds, err := strconv.Atoi(timeoutStr); err == nil {
+			timeout = time.Duration(seconds) * time.Second
+		} else {
+			// If not an integer, try to parse as a duration string
+			parsedTimeout, err := time.ParseDuration(timeoutStr)
+			if err != nil {
+				return nil, fmt.Errorf("invalid DEEPSEEK_TIMEOUT value %q: %w", timeoutStr, err)
+			}
+			timeout = parsedTimeout
 		}
-		timeout = time.Duration(seconds) * time.Second
 	}
 
 	// Read max retries (optional, defaults to 2)
